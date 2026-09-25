@@ -22,7 +22,9 @@ import {
   AlertTriangle,
   ClipboardList,
   Upload,
-  FileDown
+  FileDown,
+  Gavel,
+  Scale
 } from "lucide-react";
 import { getNavigationForRole, ROLE_LABELS } from "@/lib/auth/roles";
 import type { NavigationItem } from "@/lib/auth/roles";
@@ -47,6 +49,7 @@ const icons: Record<NavigationItem["icon"], React.ComponentType<{ className?: st
   clipboard: ClipboardList,
   upload: Upload,
   download: FileDown,
+  gavel: Gavel,
 };
 
 const BADGE_HREF_MAP: Partial<Record<keyof SidebarBadges, string>> = {
@@ -79,6 +82,7 @@ const NAV_LINKS = [
   { href: "/history/archived", icon: Archive, label: "Archived Payrolls" },
   { href: "/exports", icon: FileDown, label: "Exports" },
   { href: "/treasury", icon: Landmark, label: "Treasury" },
+  { href: "/reconciliation", icon: Scale, label: "Reconciliation" },
   { href: "/compliance", icon: Shield, label: "Compliance" },
   { href: "/setup", icon: Building2, label: "Company Setup" },
   { href: "/incidents", icon: AlertTriangle, label: "Incidents" },

@@ -29,7 +29,6 @@ import { usePayrollWizardStore } from "@/stores/payrollWizard";
 import { useWalletStore } from "@/stores/walletStore";
 import { useApprovalHistory } from "@/stores/approvalHistory";
 import { useSession } from "@/hooks/useSession";
-import { EXPECTED_NETWORK } from "@/components/providers/StellarProvider";
 import { IncidentBanner } from "@/components/ui/IncidentBanner";
 import {
   MOCK_COMPANIES,
@@ -42,8 +41,11 @@ import PayrollApprovalAuditTrail from "./PayrollApprovalAuditTrail";
 import { usePayrollAuditTrailStore } from "@/stores/payrollAuditTrail";
 import ApprovalHistoryDrawer from "./ApprovalHistoryDrawer";
 import { PayrollRiskWarnings } from "./PayrollRiskWarnings";
+import { NoteHashPreview } from "@/components/payroll/NoteHashPreview";
 import { WalletReconnectRecoveryBanner } from "@/components/features/wallet/WalletReconnectRecoveryBanner";
+import { useEnvironmentStore } from "@/stores/environment";
 import { ContractErrorHelpButton } from "@/components/features/errors/ContractErrorDrawer";
+import { MissingProofWarning } from "@/components/features/proofs/MissingProofWarning";
 import type { PayrollRun, PayrollWizardStep } from "@/types";
 import {
   trackEvent,
@@ -67,12 +69,39 @@ function stepIndex(step: PayrollWizardStep): number {
   return STEPS.findIndex((s) => s.key === step);
 }
 
+function getPeriodKey(dateLike?: string | null): string {
+  if (!dateLike) return "unknown";
+
+  const date = new Date(dateLike);
+  if (Number.isNaN(date.getTime())) return "unknown";
+
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
 function findConflictingRuns(employeeIds: string[]): PayrollRun[] {
   return MOCK_PAYROLL_RUNS.filter(
     (run) =>
       run.status === "pending" &&
       run.employeeIds.some((employeeId) => employeeIds.includes(employeeId)),
   );
+}
+
+function findDuplicateRunWarnings(employeeIds: string[]): PayrollRun[] {
+  if (employeeIds.length === 0) return [];
+
+  const selectedSet = new Set(employeeIds);
+  const currentPeriodKey = getPeriodKey(new Date().toISOString());
+
+  return MOCK_PAYROLL_RUNS.filter((run) => {
+    if (run.status !== "pending" && run.status !== "verified") return false;
+
+    const samePeriod = getPeriodKey(run.createdAt) === currentPeriodKey;
+    const employeeOverlap = run.employeeIds.some((employeeId) =>
+      selectedSet.has(employeeId),
+    );
+
+    return samePeriod || employeeOverlap;
+  });
 }
 
 function PayrollWizard() {
@@ -123,7 +152,8 @@ function PayrollWizard() {
 
   const { sessionState } = useSession();
   const network = useWalletStore((s) => s.network);
-  const isWrongNetwork = network !== EXPECTED_NETWORK;
+  const expectedNetwork = useEnvironmentStore((s) => s.getActiveProfileConfig().stellarNetwork);
+  const isWrongNetwork = network !== expectedNetwork;
   const isSessionExpired = sessionState === "expired";
 
   const selectedEmployees = useMemo(
@@ -173,7 +203,7 @@ function PayrollWizard() {
   const handleGenerateProof = useCallback(async () => {
     if (isWrongNetwork) {
       toast.error("Wrong network", {
-        description: `Switch your wallet to ${EXPECTED_NETWORK} to continue.`,
+        description: `Switch your wallet to ${expectedNetwork} to continue.`,
       });
       return;
     }
@@ -248,7 +278,7 @@ function PayrollWizard() {
   const handleSubmit = useCallback(async () => {
     if (isWrongNetwork) {
       toast.error("Wrong network", {
-        description: `Switch your wallet to ${EXPECTED_NETWORK} to continue.`,
+        description: `Switch your wallet to ${expectedNetwork} to continue.`,
       });
       return;
     }
@@ -399,7 +429,7 @@ function PayrollWizard() {
       {isWrongNetwork && (
         <IncidentBanner
           variant="warning"
-          message={`Wallet network mismatch: your wallet is connected to ${network}, but this app requires ${EXPECTED_NETWORK}. Switch networks in your wallet to resume payroll actions.`}
+          message={`Wallet network mismatch: your wallet is connected to ${network}, but this app requires ${expectedNetwork}. Switch networks in your wallet to resume payroll actions.`}
         />
       )}
 
@@ -568,6 +598,7 @@ function PayrollWizard() {
             onRetry={handleSubmit}
             onReset={handleReset}
             isWrongNetwork={isWrongNetwork}
+            expectedNetwork={expectedNetwork}
           />
         )}
       </div>
@@ -857,7 +888,20 @@ function ConfirmStep({
   const warnings = useMemo(() => {
     const list: string[] = [];
 
-    // 1. Treasury buffer warning
+    // 1. Duplicate-run warning for similar payroll drafts in the current period
+    // or the same employee group. This is a non-blocking review signal because
+    // the goal is to catch likely duplicates without preventing users from
+    // continuing when they have intentionally re-run a cohort in the same cycle.
+    const similarRuns = findDuplicateRunWarnings(
+      selectedEmployees.map((employee) => employee.id),
+    );
+    if (similarRuns.length > 0) {
+      list.push(
+        `This payroll draft overlaps with ${similarRuns.length} existing run${similarRuns.length === 1 ? "" : "s"} in the same period or employee group (${similarRuns.map((run) => run.id).join(", ")}). Review before submitting to avoid a duplicate payroll.` ,
+      );
+    }
+
+    // 2. Treasury buffer warning
     if (
       treasuryBalance >= totalAmount &&
       treasuryBalance - totalAmount < 25000
@@ -867,14 +911,14 @@ function ConfirmStep({
       );
     }
 
-    // 2. Proof expiration warning
+    // 3. Proof expiration warning
     if (store.proofStatus === "success" && isProofNearingExpiration) {
       list.push(
         "The generated ZK proof is nearing its expiration. Submit now or re-generate if delayed.",
       );
     }
 
-    // 3. Optional metadata warning
+    // 4. Optional metadata warning
     const hasMissingOptionalMetadata = selectedEmployees.some((emp) => {
       const fullEmp = MOCK_EMPLOYEES.find((e) => e.id === emp.id);
       return (
@@ -914,6 +958,33 @@ function ConfirmStep({
     return "ready";
   }, [blockers, warnings]);
 
+  const reviewChecklist = [
+    {
+      label: "Employee records reviewed",
+      detail: `${selectedEmployees.length} employee${selectedEmployees.length === 1 ? "" : "s"} included in this run`,
+      status: selectedEmployees.length > 0 && !blockers.some((block) => block.includes("inactive or invalid"))
+        ? "complete"
+        : "blocked",
+    },
+    {
+      label: "Treasury balance verified",
+      detail: `$${treasuryBalance.toLocaleString()} available for a $${totalAmount.toLocaleString()} run`,
+      status: treasuryBalance >= totalAmount ? "complete" : "blocked",
+    },
+    {
+      label: "ZK proof verified",
+      detail: store.proofStatus === "success" ? "Proof commitment is ready for signing" : "Generate and verify a proof before submitting",
+      status: store.proofStatus === "success" ? "complete" : "blocked",
+    },
+    {
+      label: "Payroll conflicts checked",
+      detail: conflictingRuns.length > 0
+        ? `${conflictingRuns.length} overlapping draft${conflictingRuns.length === 1 ? "" : "s"} require attention`
+        : "No overlapping payroll drafts found",
+      status: conflictingRuns.length > 0 ? "blocked" : "complete",
+    },
+  ] as const;
+
   return (
     <div className="space-y-6">
       {/* Header and status */}
@@ -948,6 +1019,57 @@ function ConfirmStep({
           )}
         </div>
       </div>
+
+      <section
+        aria-labelledby="payroll-review-checklist-heading"
+        className="rounded-lg border border-gray-200 bg-gray-50/60 p-4 sm:p-5"
+      >
+        <div className="mb-3">
+          <h4
+            id="payroll-review-checklist-heading"
+            className="text-sm font-semibold text-gray-900"
+          >
+            Final review checklist
+          </h4>
+          <p className="mt-1 text-xs text-gray-600">
+            Confirm each item before you sign this payroll transaction.
+          </p>
+        </div>
+        <ul className="space-y-2" aria-label="Final payroll review checklist">
+          {reviewChecklist.map((item) => {
+            const isBlocked = item.status === "blocked";
+            return (
+              <li
+                key={item.label}
+                className={`flex items-start gap-3 rounded-md border bg-white p-3 ${
+                  isBlocked ? "border-red-200" : "border-green-200"
+                }`}
+              >
+                {isBlocked ? (
+                  <ShieldAlert
+                    className="mt-0.5 h-5 w-5 shrink-0 text-red-600"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <CheckCircle
+                    className="mt-0.5 h-5 w-5 shrink-0 text-green-600"
+                    aria-hidden="true"
+                  />
+                )}
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-900">{item.label}</p>
+                  <p className={`mt-0.5 break-words text-xs ${isBlocked ? "text-red-700" : "text-gray-600"}`}>
+                    {item.detail}
+                  </p>
+                </div>
+                <span className={`ml-auto shrink-0 text-xs font-semibold ${isBlocked ? "text-red-700" : "text-green-700"}`}>
+                  {isBlocked ? "Needs attention" : "Ready"}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
 
       {/* Dynamic Alerts */}
       {state === "ready" && (
@@ -1003,6 +1125,10 @@ function ConfirmStep({
             </ul>
           </div>
         </div>
+      )}
+
+      {store.proofStatus !== "success" && (
+        <MissingProofWarning actionHref="/payroll/execute" actionLabel="Generate proof" />
       )}
 
       {/* Operational Risk Warnings */}
@@ -1243,6 +1369,11 @@ function ConfirmStep({
         </div>
       </div>
 
+      {/* Optional Note Hash Attachment */}
+      <NoteHashPreview
+        label="Attach Payroll Note Hash (Optional)"
+      />
+
       {/* Explicit Confirmation Checkbox */}
       <div className="bg-indigo-50/50 border border-indigo-150 rounded-lg p-4">
         <div className="flex items-start gap-3">
@@ -1331,6 +1462,7 @@ function SubmitStep({
   onRetry,
   onReset,
   isWrongNetwork,
+  expectedNetwork,
 }: {
   status: "idle" | "submitting" | "success" | "error";
   error: string | null;
@@ -1340,6 +1472,7 @@ function SubmitStep({
   onRetry: () => void;
   onReset: () => void;
   isWrongNetwork: boolean;
+  expectedNetwork: string;
 }) {
   const phase: PayrollLoadingPhase =
     status === "submitting"

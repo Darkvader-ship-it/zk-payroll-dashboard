@@ -85,8 +85,6 @@ export interface CompanyHealthCheckResult {
   timestamp: string;
 }
 
-
-
 export type UserRole = "admin" | "operator" | "auditor";
 
 export interface SessionPayload {
@@ -119,10 +117,40 @@ export interface PayrollTransaction {
   }>;
   txHash?: string;
   isArchived?: boolean;
+  /**
+   * Reconciliation outcome for run-derived history rows (#284). Absent when
+   * the transaction has not been reconciled yet; the quick-filter toolbar
+   * treats a missing value as "does not match a specific reconciliation
+   * filter" rather than guessing. Mirrors `PayrollRun["reconciliationStatus"]`.
+   */
+  reconciliationStatus?: "pending" | "partial" | "complete" | "failed";
+  /**
+   * Cancellation reason for run-derived history rows (#284). Mirrors
+   * `PayrollRun["cancellationReason"]`.
+   */
+  cancellationReason?:
+    | "treasury_insufficient"
+    | "approval_rejected"
+    | "compliance_hold"
+    | "duplicate_batch"
+    | "manual_request"
+    | "expired_proof"
+    | "unknown";
 }
+
+export type PayrollCancellationReason =
+  | "treasury_insufficient"
+  | "approval_rejected"
+  | "compliance_hold"
+  | "duplicate_batch"
+  | "manual_request"
+  | "expired_proof"
+  | "unknown";
 
 export interface PayrollRun extends PayrollTransaction {
   employeeIds: string[];
+  /** Settlement-service receipt identifier; absent until settlement completes. */
+  receiptId?: string | null;
   executedAt?: string | null;
   transactionHash?: string | null;
   reconciliationStatus?: "pending" | "partial" | "complete" | "failed";
@@ -132,6 +160,11 @@ export interface PayrollRun extends PayrollTransaction {
     discrepancies?: string[];
     lastReconciliedAt?: string;
   };
+  /** Cancellation details — present only when status is cancelled. */
+  cancellationReason?: PayrollCancellationReason;
+  cancellationDetail?: string;
+  cancelledAt?: string | null;
+  cancelledBy?: string | null;
 }
 
 export interface ViewKey {
@@ -218,7 +251,15 @@ export interface AuditAccessRequest {
   requesterEmail: string;
   scope: "read-only" | "full-audit";
   rationale: string;
-  status: "pending" | "approved" | "rejected" | "expired" | "revoked" | "export_ready";
+  reviewerNotes?: string;
+  requestedExpiresAt?: string;
+  status:
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "expired"
+    | "revoked"
+    | "export_ready";
   createdAt: string;
   updatedAt?: string;
   viewKeyId?: string;
@@ -292,7 +333,11 @@ export interface MultiAssetPayrollRun {
   proofStatus: "none" | "generating" | "ready" | "expired";
 }
 
-export type ReconciliationGroupStatus = "complete" | "partial" | "failed" | "pending";
+export type ReconciliationGroupStatus =
+  | "complete"
+  | "partial"
+  | "failed"
+  | "pending";
 
 export interface ReconciliationEntry {
   employeeId: string;
@@ -384,7 +429,12 @@ export interface OverduePayrollAlert {
 
 // ─── Approval Comment History (#222) ─────────────────────────────────────────
 
-export type ApprovalAction = "approved" | "rejected" | "requested_changes" | "commented" | "submitted";
+export type ApprovalAction =
+  | "approved"
+  | "rejected"
+  | "requested_changes"
+  | "commented"
+  | "submitted";
 
 export interface ApprovalComment {
   id: string;
@@ -395,7 +445,50 @@ export interface ApprovalComment {
   createdByName: string;
   createdAt: string;
   attachmentUrl?: string | null;
+  attachmentMetadata?: PayrollAttachmentMetadata | null;
 }
+
+export interface PayrollAttachmentMetadata {
+  fileName: string;
+  uploadedAt: string;
+  owner: string;
+  checksum: string;
+  accessScope: "read-only" | "full-audit";
+}
+// ─── Payroll Dispute Resolution Queue (#317) ──────────────────────────────────
+
+export type DisputeStatus = "active" | "overdue" | "resolved" | "escalated";
+
+export type DisputeResolutionAction = "resolve" | "escalate" | "dismiss";
+
+export type DisputeBlockedAction =
+  | "finalization"
+  | "approval"
+  | "execution"
+  | "reconciliation"
+  | "audit_export";
+
+export interface PayrollDispute {
+  id: string;
+  payrollPeriod: string;
+  payrollBatch: string;
+  status: DisputeStatus;
+  resolutionDeadline: string;
+  safeReasonCode: PayrollLockReasonType;
+  safeReasonDescription: string;
+  blockedActions: DisputeBlockedAction[];
+  requiredReviewer: UserRole;
+  resolutionAction: string;
+  createdAt: string;
+  payrollRunId?: string;
+  raisedBy?: string;
+  reason?: string;
+  isResolved?: boolean;
+  resolvedAt?: string | null;
+  resolvedBy?: string | null;
+  resolutionNote?: string;
+}
+
 // ── Compliance Evidence Bundle ───────────────────────────────────────────────
 
 export interface AuditSafeReceipt {
@@ -487,7 +580,11 @@ export type OnboardingStep =
   | "commitment_generated"
   | "active_status";
 
-export type OnboardingStepStatus = "pending" | "in_progress" | "complete" | "failed";
+export type OnboardingStepStatus =
+  | "pending"
+  | "in_progress"
+  | "complete"
+  | "failed";
 
 export interface EmployeeOnboardingStep {
   step: OnboardingStep;
@@ -564,9 +661,85 @@ export interface AuditReadyTimeline {
   exported: boolean;
 }
 
+// ─── Wallet Rotation Approval Timeline (#262) ────────────────────────────────
+
+export type WalletRotationEventType =
+  | "rotation_requested"
+  | "approval_granted"
+  | "approval_rejected"
+  | "cooldown_activated"
+  | "cooldown_expired"
+  | "emergency_override"
+  | "rotation_completed"
+  | "rotation_failed";
+
+export type WalletRotationReasonCode =
+  | "key_compromise"
+  | "device_loss"
+  | "scheduled_rotation"
+  | "compliance_requirement"
+  | "emergency";
+
+export interface WalletRotationEvent {
+  id: string;
+  employeeId: string;
+  type: WalletRotationEventType;
+  timestamp: string;
+  actor: string;
+  reasonCode: WalletRotationReasonCode;
+  previousWallet: string;
+  newWallet?: string;
+  /** Human-readable description — wallet addresses are masked by default */
+  summary: string;
+  metadata?: Record<string, string>;
+}
+
+export interface WalletRotationRequest {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  previousWallet: string;
+  newWallet: string;
+  reasonCode: WalletRotationReasonCode;
+  requestedBy: string;
+  requestedAt: string;
+  status:
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "cooldown"
+    | "completed"
+    | "failed";
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectionReason?: string;
+  cooldownEndsAt?: string;
+  isEmergency?: boolean;
+  events: WalletRotationEvent[];
+  metadata?: Record<string, string>;
+}
+
+export interface WalletRotationCooldown {
+  employeeId: string;
+  rotationId: string;
+  activatedAt: string;
+  expiresAt: string;
+  isActive: boolean;
+}
+
+export interface WalletRotationWarning {
+  type: "cooldown_active" | "payroll_blocker" | "pending_approval";
+  message: string;
+  severity: "info" | "warning" | "critical";
+}
+
 // ─── Compliance Evidence Pointer Manager (#338) ──────────────────────────────
 
-export type EvidencePointerType = "url" | "ipfs" | "document-hash" | "case-reference";
+export type EvidencePointerType =
+  | "url"
+  | "ipfs"
+  | "document-hash"
+  | "case-reference";
 
 export type EvidencePointerStatus = "valid" | "invalid" | "pending";
 
@@ -643,15 +816,6 @@ export interface ApproverThresholdRotationRequest {
 
 // ─── Period Close Reconciliation Dashboard (#341) ────────────────────────────
 
-export interface PayrollDispute {
-  id: string;
-  payrollRunId: string;
-  raisedBy: string;
-  reason: string;
-  isResolved: boolean;
-  resolvedAt?: string | null;
-}
-
 export interface FundingReservation {
   id: string;
   payrollRunId: string;
@@ -661,7 +825,11 @@ export interface FundingReservation {
   releasedAt?: string | null;
 }
 
-export type PeriodCloseBlockerCategory = "holds" | "disputes" | "funding_reservations" | "audit_references";
+export type PeriodCloseBlockerCategory =
+  | "holds"
+  | "disputes"
+  | "funding_reservations"
+  | "audit_references";
 
 export interface PeriodCloseBlocker {
   category: PeriodCloseBlockerCategory;
@@ -681,3 +849,52 @@ export interface PeriodCloseChecklist {
   canClose: boolean;
 }
 
+// ── Exception Triage Dashboard Types (Issue #262) ───────────────────────────
+
+export type ExceptionSeverity = "blocking" | "warning" | "info";
+export type ExceptionCategory =
+  | "zk_proof"
+  | "compliance"
+  | "treasury"
+  | "employee_data"
+  | "network"
+  | "reconciliation";
+
+export type ExceptionSource =
+  | "circuit_verifier"
+  | "wallet_router"
+  | "compliance_check"
+  | "treasury_guard"
+  | "batch_parser"
+  | "oracle_bridge";
+
+export type ExceptionStatus =
+  | "open"
+  | "investigating"
+  | "resolved"
+  | "dismissed";
+
+export interface PayrollTriageException {
+  id: string;
+  runId: string;
+  category: ExceptionCategory;
+  severity: ExceptionSeverity;
+  status: ExceptionStatus;
+  title: string;
+  description: string;
+  source: ExceptionSource;
+  employeeCount: number;
+  affectedEmployees?: Array<{
+    id: string;
+    name: string;
+    department?: string;
+    /** Redacted salary commitment for privacy */
+    salaryCommitmentHash: string;
+  }>;
+  suggestedAction: string;
+  nextStepUrl?: string;
+  createdAt: string;
+  resolvedAt?: string | null;
+  /** Encrypted or redacted token for proof debugging */
+  redactedProofDigest?: string;
+}
